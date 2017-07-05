@@ -1,0 +1,9 @@
+name: Nodeaccess
+type: module
+description: 'Provides per node access control.'
+core: 8.x
+package: 'Access control'
+configure: nodeaccess_admin_settings
+
+dependencies:
+  - node
