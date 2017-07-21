@@ -1,0 +1,19 @@
+administer nodeaccess:
+  title: 'Administer Nodeaccess'
+  description: 'View and modify node access for any nodes with administer access'
+
+grant node permissions:
+  title: 'Grant Node Permissions'
+  description: 'View and modify permissions for any nodes'
+
+grant editable node permissions:
+  title: 'Grant node edit permissions'
+  description: 'Node edit permissions for any nodes'
+
+grant deletable node permissions:
+  title: 'Grant node delete permissions'
+  description: 'Node delete permissions for any nodes'
+
+grant own node permissions:
+  title: 'Grant own node permissions'
+  description: 'View and modify permissions for own nodes'

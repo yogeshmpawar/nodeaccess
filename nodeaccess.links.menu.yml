@@ -1,0 +1,6 @@
+nodeaccess_admin_menu:
+  title: 'Nodeaccess Admin Settings'
+  description: 'Change default settings for the Nodeaccess module.'
+  route_name: nodeaccess.admin_settings
+  parent: user.admin_index
+  weight: -1

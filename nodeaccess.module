@@ -1,0 +1,1164 @@
+<?php
+
+/**
+ * @file
+ * Provide per node access control.
+ */
+
+use Drupal\Core\Session\AccountInterface;
+use Drupal\Core\Database\Database;
+use Drupal\node\NodeInterface;
+use Drupal\node\NodeTypeInterface;
+use Drupal\Core\Routing\RouteMatchInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Render\Element;
+use Drupal\Core\Cache\Cache;
+use Drupal\user\RoleInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Url;
+use Drupal\user\Entity\Role;
+use Drupal\node\Entity\Node;
+
+/**
+ * Implements hook_help().
+ */
+function nodeaccess_help($route_name, RouteMatchInterface $route_match) {
+  switch ($route_name) {
+    case 'entity.node.grant_form':
+      return t("You can set grants for individual users. Enter a name or a
+        partial name in the box and click Search or press return. You must check
+        the 'Keep?' checkbox if you want to keep the user for granting. Note
+        that user grants are in addition to those coming from roles.");
+  }
+}
+
+
+/**
+ * Implements hook_menu().
+ *
+ * @return array
+ */
+function nodeaccess_menu() {
+  $items = [];
+
+  $items['admin/config/people/nodeaccess'] = [
+    'title' => 'Nodeaccess',
+    'description' => 'Change default settings for the Nodeaccess module.',
+    'page callback' => 'nodeaccess_admin',
+    'file' => 'nodeaccess.admin.inc',
+    'access arguments' => ['administer nodeaccess'],
+  ];
+
+  $items['node/%node/grant'] = [
+    'title' => 'Grant',
+    'page callback' => 'nodeaccess_grant_tab',
+    'page arguments' => [1],
+    'access callback' => 'nodeaccess_access',
+    'access arguments' => ['grant', 1],
+    'weight' => 5,
+    'type' => MENU_LOCAL_TASK,
+  ];
+
+  return $items;
+}
+
+
+/**
+ * Implements hook_admin_paths().
+ *
+ * @return array
+ */
+function nodeaccess_admin_paths() {
+  $paths = [
+    'node/*/grant' => TRUE,
+    'admin/config/people/nodeaccess' => TRUE,
+  ];
+
+  return $paths;
+}
+
+
+/**
+ * Implements hook_permission().
+ *
+ * @return array
+ */
+// function nodeaccess_permission() {
+
+//   return [
+//     'administer nodeaccess' => [
+//       'title' => t('Administer Nodeaccess'),
+//     ],
+//     'grant node permissions' => [
+//       'title' => t('Grant Node Permissions'),
+//     ],
+//     'grant editable node permissions' => [
+//       'title' => t('Grant node edit permissions'),
+//     ],
+//     'grant deletable node permissions' => [
+//       'title' => t('Grant node delete permissions'),
+//     ],
+//     'grant own node permissions' => [
+//       'title' => t('Grant own node permissions'),
+//     ],
+//   ];
+// }
+
+
+/**
+ * Implements hook_node_access().
+ *
+ * @param $node
+ * @param $op
+ * @param $account
+ *
+ * @return string
+ */
+function nodeaccess_node_access($node, $op, $account) {
+  switch ($op) {
+    case 'update':
+    case 'delete':
+      if (!isset($account->uid)) {
+        global $user;
+        $account = $user;
+      }
+      // If the node belongs to a deleted user.
+      if ($account->uid == 0 && $node->uid == 0) {
+        // We check if the role has particular access to this node.
+        $grants = nodeaccess_get_grants($node);
+        // If anonymous has rights to this node, we allow them.
+        if (($grants['rid'][DRUPAL_ANONYMOUS_RID]['grant_update'] && $op == 'update') ||
+            ($grants['rid'][DRUPAL_ANONYMOUS_RID]['grant_delete'] && $op == 'delete')) {
+
+          return NODE_ACCESS_ALLOW;
+        }
+
+        return NODE_ACCESS_DENY;
+      }
+      break;
+
+    case 'view':
+      if (!isset($account->uid)) {
+        global $user;
+        $account = $user;
+      }
+      // If the node is not published. We check other permissions.
+      if (!$node->status) {
+        // If the current user is the author and not anonymous.
+        if ($node->uid == $account->uid && $account->uid > 0) {
+          // We check to see if they have access to view own unpublished.
+          if (user_access('view own unpublished content') || user_access('bypass node access')) {
+
+            return NODE_ACCESS_ALLOW;
+          }
+        }
+        elseif (user_access('bypass node access')) {
+
+          return NODE_ACCESS_ALLOW;
+        }
+
+        return NODE_ACCESS_IGNORE;
+      }
+      break;
+
+  }
+}
+
+
+/**
+ * Determine access to Grant tab.
+ *
+ * @param $op
+ * @param $node
+ * @param $account
+ *
+ * @return bool
+ *   Whether the user has access to the grant tab.
+ */
+// function nodeaccess_access($op, $node, $account = NULL) {
+//   $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+//   global $user;
+//   if (!$node) {
+
+//     return FALSE;
+//   }
+
+//   // Apparently D7 no longer defaults to admin getting anything?
+//   if (user_access('administer nodeaccess')) {
+
+//     return TRUE;
+//   }
+
+//   // If no user object is supplied, the access check is for the current user.
+//   if (empty($account)) {
+//     $account = $user;
+//   }
+//   $allowed_types = $config->get('nodeaccess_types');
+//   if ($op == 'grant') {
+//     if ($node->nid && isset($allowed_types[$node->type]) && !empty($allowed_types[$node->type]) &&
+//         (user_access('grant node permissions', $account) ||
+//          (user_access('grant editable node permissions', $account) && node_access('update', $node, $account)) ||
+//          (user_access('grant deletable node permissions', $account) && node_access('delete', $node, $account)) ||
+//          (user_access('grant own node permissions', $account) && ($account->uid == $node->uid)))) {
+
+//       return TRUE;
+//     }
+//   }
+
+//   return FALSE;
+// }
+
+
+/**
+ * Implements hook_theme().
+ *
+ * @param $existing
+ * @param $type
+ * @param $theme
+ * @param $path
+ *
+ * @return array
+ */
+function nodeaccess_theme($existing, $type, $theme, $path) {
+
+  return [
+    'nodeaccess_admin_form_roles' => [
+      'render element'  => 'form',
+    ],
+    'nodeaccess_admin_form_types' => [
+      'render element'  => 'form',
+    ],
+    'nodeaccess_grants_form'  => [
+      'render element'  => 'form',
+    ],
+  ];
+}
+
+
+/**
+ * Menu callback. Draws the grant tab.
+ *
+ * @param Object $node
+ *
+ * @return array
+ *   Form array.
+ */
+function nodeaccess_grant_tab(NodeInterface $node) {
+
+  return drupal_get_form('nodeaccess_grants_form', $node);
+}
+
+
+/**
+ * Menu callback. Draws the grant tab.
+ *
+ * @param $form
+ * @param $form_state
+ * @param $node
+ *
+ * @return mixed
+ */
+function nodeaccess_grants_form($form, &$form_state, $node) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $form_values = &$form_state['values'];
+
+  if (!$form_values) {
+    $form_values = [];
+    $grants = nodeaccess_get_grants($node);
+    $form_values['rid'] = isset($grants['rid']) ? $grants['rid'] : array();
+    $form_values['uid'] = isset($grants['uid']) ? $grants['uid'] : array();
+  }
+  elseif ($form_values['keys']) {
+    // @todo rewrite
+    $params = [];
+    $sql = "SELECT uid, name FROM {users} WHERE name LIKE :name";
+    $name = preg_replace('!\*+!', '%', $form_values['keys']);
+    $params[':name'] = $name;
+
+    if (isset($form_values['uid']) && count($form_values['uid'])) {
+      $sql .= ' AND uid NOT IN (:uid)';
+      $params[':uid'] = array_keys($form_values['uid']);
+    }
+
+    $result = db_query($sql, $params);
+    foreach ($result as $account) {
+      $form_values['uid'][$account->uid] = [
+        'name' => $account->name,
+        'keep' => 1,
+        'grant_view' => isset($form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_view']) ?
+          $form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_view'] : 0,
+        'grant_update' => isset($form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_update']) ?
+          $form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_update'] : 0,
+        'grant_delete' => isset($form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_delete']) ?
+          $form_values['rid'][DRUPAL_AUTHENTICATED_RID]['grant_delete'] : 0,
+      ];
+    }
+  }
+
+  if (!isset($form_values['rid'])) {
+    $form_values['rid'] = [];
+  }
+
+  if (!isset($form_values['uid'])) {
+    $form_values['uid'] = [];
+  }
+
+  $roles = $form_values['rid'];
+  $users = $form_values['uid'];
+
+  $form['nid'] = [
+    '#type' => 'hidden',
+    '#value' => $node->nid,
+  ];
+
+  $allowed_roles = $config->get('nodeaccess_roles');
+  $allowed_grants = $config->get('nodeaccess_grants');
+  // If $preserve is TRUE, the fields the user is not allowed to view or
+  // edit are included in the form as hidden fields to preserve them.
+  $preserve = $config->get('nodeaccess_preserve');
+  // Roles table.
+  if (is_array($roles)) {
+    $form['rid'] = ['#tree' => TRUE];
+    foreach ($roles as $key => $field) {
+      if (isset($allowed_roles[$key]) && $allowed_roles[$key]) {
+        $form['rid'][$key]['name'] = [
+          '#type' => 'hidden',
+          '#value' => $field['name'],
+        ];
+        if ($allowed_grants['view']) {
+          $form['rid'][$key]['grant_view'] = [
+            '#type' => 'checkbox',
+            '#default_value' => $field['grant_view'],
+          ];
+        }
+        elseif ($preserve) {
+          $form['rid'][$key]['grant_view'] = [
+            '#type' => 'hidden',
+            '#value' => $field['grant_view'],
+          ];
+        }
+        if ($allowed_grants['edit']) {
+          $form['rid'][$key]['grant_update'] = [
+            '#type' => 'checkbox',
+            '#default_value' => $field['grant_update'],
+          ];
+        }
+        elseif ($preserve) {
+          $form['rid'][$key]['grant_update'] = [
+            '#type' => 'hidden',
+            '#value' => $field['grant_update'],
+          ];
+        }
+        if ($allowed_grants['delete']) {
+          $form['rid'][$key]['grant_delete'] = [
+            '#type' => 'checkbox',
+            '#default_value' => $field['grant_delete'],
+          ];
+        }
+        elseif ($preserve) {
+          $form['rid'][$key]['grant_delete'] = [
+            '#type' => 'hidden',
+            '#value' => $field['grant_delete'],
+          ];
+        }
+      }
+      elseif ($preserve) {
+        $form['rid'][$key]['name'] = [
+          '#type' => 'hidden',
+          '#value' => $field['name'],
+        ];
+        $form['rid'][$key]['grant_view'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_view'],
+        ];
+        $form['rid'][$key]['grant_update'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_update'],
+        ];
+        $form['rid'][$key]['grant_delete'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_delete'],
+        ];
+      }
+    }
+  }
+
+  // Users table.
+  if (is_array($users)) {
+    $form['uid'] = ['#tree' => TRUE];
+    foreach ($users as $key => $field) {
+      $form['uid'][$key]['name'] = [
+        '#type' => 'hidden',
+        '#value' => $field['name'],
+      ];
+      $form['uid'][$key]['keep'] = [
+        '#type' => 'checkbox',
+        '#default_value' => $field['keep'],
+      ];
+      if ($allowed_grants['view']) {
+        $form['uid'][$key]['grant_view'] = [
+          '#type' => 'checkbox',
+          '#default_value' => $field['grant_view'],
+        ];
+      }
+      elseif ($preserve) {
+        $form['uid'][$key]['grant_view'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_view'],
+        ];
+      }
+      if ($allowed_grants['edit']) {
+        $form['uid'][$key]['grant_update'] = [
+          '#type' => 'checkbox',
+          '#default_value' => $field['grant_update'],
+        ];
+      }
+      elseif ($preserve) {
+        $form['uid'][$key]['grant_update'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_update'],
+        ];
+      }
+      if ($allowed_grants['delete']) {
+        $form['uid'][$key]['grant_delete'] = [
+          '#type' => 'checkbox',
+          '#default_value' => $field['grant_delete'],
+        ];
+      }
+      elseif ($preserve) {
+        $form['uid'][$key]['grant_delete'] = [
+          '#type' => 'hidden',
+          '#value' => $field['grant_delete'],
+        ];
+      }
+    }
+  }
+
+  // Autocomplete returns errors if users don't have access to profiles.
+  if (user_access('access user profiles')) {
+    $form['keys'] = [
+      '#type' => 'textfield',
+      '#default_value' => isset($form_values['keys']) ? $form_values['keys'] : '',
+      '#size' => 40,
+      '#autocomplete_path' => 'user/autocomplete',
+    ];
+  }
+  else {
+    $form['keys'] = [
+      '#type' => 'textfield',
+      '#default_value' => isset($form_values['keys'])? $form_values['keys'] : '',
+      '#size' => 40,
+    ];
+  }
+
+  $form['search'] = [
+    '#type' => 'submit',
+    '#value' => t('Search'),
+  ];
+
+  $form['submit'] = [
+    '#type' => 'submit',
+    '#value' => t('Save Grants'),
+  ];
+
+  return $form;
+}
+
+
+/**
+ * Validate function for nodeaccess_grants_form.
+ *
+ * @param array $form
+ * @param array &$form_state
+ */
+function nodeaccess_grants_form_validate($form, &$form_state) {
+  $form_values = &$form_state['values'];
+
+  // Delete unkept users.
+  if (isset($form_values['uid']) && is_array($form_values['uid'])) {
+    foreach ($form_values['uid'] as $uid => $row) {
+      if (!$row['keep']) {
+        unset($form_values['uid'][$uid]);
+      }
+    }
+  }
+
+  if (!isset($form_values['uid'])) {
+    unset($form_values['uid']);
+  }
+
+}
+
+
+/**
+ * Submit function for nodeaccess_grants_form.
+ *
+ * @param array $form
+ * @param array &$form_state
+ */
+function nodeaccess_grants_form_submit($form, &$form_state) {
+
+  if ($form_state['clicked_button']['#id'] == 'edit-search') {
+    $form_state['rebuild'] = TRUE;
+    $form_state['storage']['values'] = $form_state['values'];
+  }
+  else {
+    unset($form_state['rebuild']);
+    _nodeaccess_grants_form_submit($form, $form_state);
+    drupal_set_message(t('Grants saved.'));
+  }
+}
+
+
+/**
+ * Private function to submit the per-node grants table.
+ *
+ * @param array $form
+ * @param array &$form_state
+ */
+function _nodeaccess_grants_form_submit($form, &$form_state) {
+  $form_values = &$form_state['values'];
+
+  $grants = [];
+  $nid = $form_values['nid'];
+  $node = node_load($nid);
+
+  foreach (['uid', 'rid'] as $type) {
+    $realm = 'nodeaccess_' . $type;
+
+    if (isset($form_values[$type]) && is_array($form_values[$type])) {
+      foreach ($form_values[$type] as $gid => $line) {
+        $grant = [
+          'gid' => $gid,
+          'realm' => $realm,
+          'grant_view' => empty($line['grant_view']) ? 0 : 1,
+          'grant_update' => empty($line['grant_update']) ? 0 : 1,
+          'grant_delete' => empty($line['grant_delete']) ? 0 : 1,
+        ];
+
+        $grants[] = $grant;
+
+      }
+    }
+
+  }
+
+  nodeaccess_set_grants($node, $grants);
+
+}
+
+
+/**
+ * Theme function for nodeaccess_grants_form.
+ *
+ * @param array $vars
+ *
+ * @return string
+ */
+function theme_nodeaccess_grants_form($vars) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $output = '';
+
+  $form = $vars['form'];
+  $rows = [];
+  $allowed_roles = $config->get('nodeaccess_roles');
+  $allowed_grants = $config->get('nodeaccess_grants');
+  // Retrieve role names for columns.
+  $role_names = user_roles();
+  $role_aliases = nodeaccess_get_role_aliases();
+
+  // Replace names with aliases.
+  foreach ($role_names as $rid => $name) {
+    if (isset($role_aliases[$rid]['alias'])) {
+      $role_names[$rid] = $role_aliases[$rid]['alias'];
+    }
+  }
+
+  // Roles table.
+  $roles = element_children($form['rid']);
+
+  if (count($roles) && count($allowed_roles)) {
+    $header = array();
+    $header[] = t('Role');
+
+    if ($allowed_grants['view']) {
+      $header[] = t('View');
+    }
+
+    if ($allowed_grants['edit']) {
+      $header[] = t('Edit');
+    }
+
+    if ($allowed_grants['delete']) {
+      $header[] = t('Delete');
+    }
+
+    foreach ($roles as $key) {
+
+      if (isset($allowed_roles[$key]) && $allowed_roles[$key]) {
+        $row = [];
+        $row[] = $role_names[$key] . drupal_render($form['rid'][$key]['name']);
+
+        if ($allowed_grants['view']) {
+          $row[] = drupal_render($form['rid'][$key]['grant_view']);
+        }
+
+        if ($allowed_grants['edit']) {
+          $row[] = drupal_render($form['rid'][$key]['grant_update']);
+        }
+
+        if ($allowed_grants['delete']) {
+          $row[] = drupal_render($form['rid'][$key]['grant_delete']);
+        }
+        $rows[] = $row;
+      }
+    }
+    $output .= theme('table', ['header' => $header, 'rows' => $rows]);
+  }
+
+  // Search form.
+  $output .= '<p><div class="search-form">';
+  $output .= '<strong>' . t('Enter names to search for users:') . '</strong>';
+  $output .= '<div class="container-inline">';
+  $output .= drupal_render($form['keys']);
+  $output .= drupal_render($form['search']);
+  $output .= '</div></div></p>';
+
+  // Users table.
+  unset($rows);
+  $users = element_children($form['uid']);
+
+  if (count($users) > 0) {
+    $header = [];
+    $rows = [];
+    $header[] = t('User');
+    $header[] = t('Keep?');
+    if ($allowed_grants['view']) {
+      $header[] = t('View');
+    }
+    if ($allowed_grants['edit']) {
+      $header[] = t('Edit');
+    }
+    if ($allowed_grants['delete']) {
+      $header[] = t('Delete');
+    }
+    foreach ($users as $key) {
+      $row = [];
+      $row[] = $form['uid'][$key]['name']['#value'];
+      $row[] = drupal_render($form['uid'][$key]['keep']);
+      if ($allowed_grants['view']) {
+        $row[] = drupal_render($form['uid'][$key]['grant_view']);
+      }
+      if ($allowed_grants['edit']) {
+        $row[] = drupal_render($form['uid'][$key]['grant_update']);
+      }
+      if ($allowed_grants['delete']) {
+        $row[] = drupal_render($form['uid'][$key]['grant_delete']);
+      }
+      $rows[] = $row;
+    }
+    $output .= theme('table', ['header' => $header, 'rows' => $rows]);
+  }
+
+  $output .= drupal_render_children($form);
+
+  return $output;
+}
+
+
+/**
+ * Implements hook_node_grants().
+ */
+function nodeaccess_node_grants(AccountInterface $account, $op) {
+  $roles = is_array($account->roles) ? array_keys($account->roles) : [-1];
+  return [
+    'nodeaccess_rid' => $roles,
+    'nodeaccess_uid' => [$account->uid],
+    'nodeaccess_author' => [$account->id()],
+  ];
+}
+
+/**
+ * Implements hook_node_update().
+ *
+ * @param Object $node
+ */
+function nodeaccess_node_update(NodeInterface $node) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  if ($this->moduleHandler->moduleExists('user_reference')) {
+    $fields = $config->get('nodeaccess_' . $node->type . '_user_reference');
+    foreach (array_keys($fields) as $field_name) {
+      if (isset($node->$field_name)) {
+        $old_node = node_load($node->nid);
+        // Delete the old user as it's changed.
+        if ($node->$field_name != $old_node->$field_name) {
+          nodeaccess_delete_user_reference($old_node);
+          nodeaccess_insert_user_reference($node);
+        }
+        break;
+      }
+    }
+  }
+  // Done, author permissions are not written into nodeaccess.
+}
+
+/**
+ * Implements hook_node_delete().
+ *
+ * @param Object $node
+ */
+function nodeaccess_node_delete(NodeInterface $node) {
+  // Deleting node, delete related permissions.
+  nodeaccess_delete_grants($node);
+}
+
+/**
+ * Implements hook_node_access_records().
+ *
+ */
+function nodeaccess_node_access_records(NodeInterface $node) {
+  if (nodeaccess_disabling() || !$node->status) {
+    return NULL;
+  }
+
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  // Need to find out if node has own grants or whether to use defaults.
+  //$default = variable_get('nodeaccess_' . $node->type, []);
+  $default = $config->get('nodeaccess_' . $node->type);
+
+  // Setup default keys that are required by node_access_write_grants().
+  $grant_defaults = [
+    'gid' => 0,
+    'realm' => 'nodeaccess_rid',
+    'grant_view' => 0,
+    'grant_update' => 0,
+    'grant_delete' => 0,
+    'priority' => $config->get('nodeaccess_priority'),
+  ];
+
+  $result = db_query("SELECT gid, realm, grant_view, grant_update, grant_delete FROM {nodeaccess} WHERE nid = :nid",
+    [':nid' => $node->nid]);
+  if (!$result->rowCount()) {
+    // Node has no own grants, use defaults.
+    $grants = $default;
+  }
+  else {
+    // Node has own grants, use them.
+    $grants = [];
+    while ($row = $result->fetchAssoc()) {
+      $grants[] = $row;
+    }
+  }
+
+  // Apply author grants.
+  $author_prefs = $config->get('nodeaccess_authors');
+  // Array is pre-populated with grant values.
+  $grant = $author_prefs[$node->type];
+  $grant['gid'] = $node->uid;
+  $grant['realm'] = 'nodeaccess_author';
+  // Include author grant even with all values FALSE, it may be
+  // needed to overwrite an older value.
+  $grants[] = $grant;
+
+  foreach ($grants as $id => $grant) {
+    // Merge missing default grant keys.
+    $grants[$id] = $grants[$id] + $grant_defaults;
+  }
+
+  return $grants;
+}
+
+
+/**
+ * Mark module to be in process of disabling.
+ *
+ * Prevents entries being saved to node_access while module is being disabled.
+ *
+ * @param mixed $set
+ *   A boolean set or NULL to not change status.
+ *
+ * @return bool
+ */
+function nodeaccess_disabling($set = NULL) {
+  static $disabling = FALSE;
+
+  if ($set !== NULL) {
+    $disabling = $set;
+  }
+
+  return $disabling;
+}
+
+
+/**
+ * Implements hook_node_type_delete().
+ */
+function nodeaccess_node_type_delete(NodeTypeInterface $info) {
+  // Node type is being deleted, delete its preferences.
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $config->delete('nodeaccess_' . $info->type);
+  $author_prefs = $config->get('nodeaccess_authors');
+  unset($author_prefs[$info->type]);
+  $config->set('nodeaccess_authors', $author_prefs);
+  $config->save();
+}
+
+/**
+ * Implements hook_node_type_update().
+ */
+function nodeaccess_node_type_update(NodeTypeInterface $info) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  // Node type has changed, move preferences to new type.
+  if (!empty($info->old_type) && $info->old_type != $info->type) {
+    $setting = variable_get('nodeaccess_' . $info->old_type, array());
+    $config->set('nodeaccess_' . $info->type, $setting);
+    $author_prefs = $config->get('nodeaccess_authors');
+    $author_prefs[$info->type] = [
+      'grant_view' => $author_prefs[$info->old_type]['grant_view'],
+      'grant_update' => $author_prefs[$info->old_type]['grant_update'],
+      'grant_delete' => $author_prefs[$info->old_type]['grant_delete'],
+    ];
+    unset($author_prefs[$info->old_type]);
+    $config->set('nodeaccess_authors', $author_prefs);
+    $config->save();
+  }
+}
+
+/**
+ * Implements hook_node_type_insert().
+ *
+ * @param Object $info
+ */
+function nodeaccess_node_type_insert(NodeTypeInterface $info) {
+  // New node type, default to whatever is set for access content permission.
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $role_perms = Role::getPermissions();
+  //$role_perms = user_role_permissions(array(1 => 1, 2 => 2));
+  $role_perms[DRUPAL_ANONYMOUS_RID]['access content'] = isset($role_perms[1]['access content']) ?
+                                      intval($role_perms[1]['access content']) : 0;
+  $role_perms[DRUPAL_AUTHENTICATED_RID]['access content'] = isset($role_perms[2]['access content']) ?
+                                      intval($role_perms[2]['access content']) : 0;
+  $grants[] = [
+    'gid' => DRUPAL_ANONYMOUS_RID,
+    'realm' => 'nodeaccess_rid',
+    'grant_view' => $role_perms[DRUPAL_ANONYMOUS_RID]['access content'],
+    'grant_update' => 0,
+    'grant_delete' => 0,
+  ];
+  $grants[] = [
+    'gid' => DRUPAL_AUTHENTICATED_RID,
+    'realm' => 'nodeaccess_rid',
+    'grant_view' => $role_perms[DRUPAL_AUTHENTICATED_RID]['access content'],
+    'grant_update' => 0,
+    'grant_delete' => 0,
+  ];
+  $config->set('nodeaccess_' . $info->type, $grants);
+
+  // Add permissions for author.
+  $author_prefs = $config->get('nodeaccess_authors');
+  $author_prefs[$info->type] = [
+    'grant_view' => 0,
+    'grant_update' => 0,
+    'grant_delete' => 0,
+  ];
+
+  $config->set('nodeaccess_authors', $author_prefs);
+  $config->save();
+  node_access_needs_rebuild(TRUE);
+}
+
+
+/**
+ * Retrieve role aliases.
+ *
+ * @return array
+ *  Role aliases indexed by rid.
+ */
+function nodeaccess_get_role_aliases() {
+  $aliases = [];
+  $sql = 'SELECT r.rid, r.name, a.name AS alias, a.weight
+    FROM {role} r
+    LEFT JOIN {nodeaccess_role_alias} a ON r.rid = a.rid
+    ORDER BY a.weight, r.weight, a.name, r.name';
+  $results = db_query($sql);
+  foreach ($results as $a) {
+    $aliases[$a->rid]['name'] = $a->name;
+    $aliases[$a->rid]['alias'] = $a->alias;
+    $aliases[$a->rid]['weight'] = $a->weight;
+  }
+
+  return $aliases;
+}
+
+
+/**
+ * Save a role alias.
+ *
+ * @param array $edit
+ *   An array of aliases to save, indexed by rid.
+ */
+function nodeaccess_save_role_aliases($edit) {
+  db_delete('nodeaccess_role_alias')->execute();
+  if (is_array($edit)) {
+    foreach ($edit as $key => $value) {
+      db_insert('nodeaccess_role_alias')->fields(array(
+        'rid' => $key,
+        'name' => $value['name'],
+        'weight' => $value['weight'],
+      ))->execute();
+    }
+  }
+
+  return;
+}
+
+
+/**
+ * Insert userreference grants from a node.
+ *
+ * @param Object $node
+ */
+function nodeaccess_insert_user_reference(NodeInterface $node) {
+  $form_values = nodeaccess_get_grants($node);
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  // Now, append or overwrite the uid with what was specified in the user
+  // reference field.
+  $fields = $config->get('nodeaccess_' . $node->type . '_user_reference');
+  foreach ($fields as $field_name => $field) {
+    $user_uids = field_get_items('node', $node, $field_name);
+    $user_references = user_load_multiple($user_uids);
+    // Add each of the referenced users a form value.
+    foreach ($user_references as $user) {
+      $form_values['uid'][$user->uid] = [
+        'name' => $user->name,
+        'keep' => 1,
+        'grant_view' => $field['grant_view'],
+        'grant_update' => $field['grant_update'],
+        'grant_delete' => $field['grant_delete'],
+      ];
+    }
+  }
+  // Only do the changes if there are users to save.
+  if (count($form_values['uid']) > 0) {
+    $form_values['nid'] = $node->nid;
+    $form_state = ['values' => $form_values];
+    _nodeaccess_grants_form_submit(NULL, $form_state);
+  }
+}
+
+
+/**
+ * Delete all userreference user grants from a node.
+ *
+ * @param Object $node
+ */
+function nodeaccess_delete_user_reference(NodeInterface $node) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $form_values = nodeaccess_get_grants($node);
+  // Now, append or overwrite the uid with what was specified in the user
+  // reference field.
+  $fields = $config->get('nodeaccess_' . $node->type . '_user_reference');
+  foreach ($fields as $field_name => $field) {
+    $user_uids = field_get_items('node', $node, $field_name);
+    $user_references = user_load_multiple($user_uids);
+    foreach ($user_references as $user) {
+      unset($form_values['uid'][$user->uid]);
+    }
+  }
+  $form_values['nid'] = $node->nid;
+  $form_state = array('values' => $form_values);
+
+  _nodeaccess_grants_form_submit(NULL, $form_state);
+}
+
+
+/**
+ * Return the grants applied to a node object used for Grant form.
+ *
+ * @param Object $node
+ *
+ * @return array
+ *   An array of grants with keys 'rid' for roles and 'uid' for users.
+ */
+function nodeaccess_get_grants(NodeInterface $node) {
+  $grants = [];
+  // Load all roles.
+  $result = db_query("SELECT r.rid, nra.name, na.grant_view, na.grant_update, na.grant_delete FROM {role} r LEFT JOIN {nodeaccess_role_alias} nra ON r.rid = nra.rid LEFT JOIN {node_access} na ON r.rid = na.gid AND na.realm = :realm AND na.nid = :nid ORDER BY nra.weight, nra.name",
+    [
+      ':realm' => 'nodeaccess_rid',
+      ':nid' => $node->nid,
+    ]);
+  foreach ($result as $grant) {
+    if ($grant->name) {
+      $grants['rid'][$grant->rid] = [
+        'name' => $grant->name,
+        'grant_view' => (bool) $grant->grant_view,
+        'grant_update' => (bool) $grant->grant_update,
+        'grant_delete' => (bool) $grant->grant_delete,
+      ];
+    }
+  }
+  // Load users from node_access.
+  $result = db_query("SELECT uid, name, grant_view, grant_update, grant_delete FROM {node_access} LEFT JOIN {users} ON uid = gid WHERE nid = :nid AND realm = :realm ORDER BY name",
+    [
+      ':nid' => $node->nid,
+      ':realm' => 'nodeaccess_uid',
+    ]);
+  foreach ($result as $account) {
+    $grants['uid'][$account->uid] = [
+      'name' => $account->name,
+      'keep' => TRUE,
+      'grant_view' => (bool) $account->grant_view,
+      'grant_update' => (bool) $account->grant_update,
+      'grant_delete' => (bool) $account->grant_delete,
+    ];
+  }
+
+  return $grants;
+}
+
+
+/**
+ * Set all grants for a node to nodeaccess table and acquire them.
+ *
+ * @param $node
+ *   node object the grants are being applied to.
+ * @param array $grants
+ *   array of grants as defined (@see nodeaccess_save_grant).
+ */
+function nodeaccess_set_grants(NodeInterface $node, $grants = []) {
+  // Allow other modules to edit all grants for array.
+  drupal_alter('nodeaccess_grants', $grants, $node);
+
+  nodeaccess_delete_grants($node);
+
+  if (count($grants)) {
+    foreach ($grants as $grant) {
+      // Allow other modules to edit single grants.
+      drupal_alter('nodeaccess_grant', $grant, $node);
+      nodeaccess_save_grant($node, $grant);
+    }
+  }
+
+  node_access_acquire_grants($node);
+}
+
+/**
+ * Delete all grants from nodeaccess table for this node.
+ *
+ * @param $node
+ *   node object whose grants are being revoked.
+ */
+function nodeaccess_delete_grants(NodeInterface $node) {
+  try {
+    \Drupal::database()->delete('nodeaccess')
+      ->condition('nid', $node->id())
+      ->execute();
+
+    node_access_acquire_grants($node);
+  }
+  catch (Exception $e) {
+    drupal_set_message(t("Database error has occurred while clearing nodeaccess table."), 'error');
+    $message = t('Database error: @message.', ['@message' => $e->getMessage()]);
+    \Drupal::logger('nodeaccess')->error($message);
+  }
+}
+
+/**
+ * Revoke all custom grants from nodeaccess table for this node.  Essentially
+ * reset the grants to their default state (by node type).
+ *
+ * @param $node
+ *   node object whose grants are being revoked.
+ */
+function nodeaccess_revoke_grants(NodeInterface $node) {
+  nodeaccess_delete_grants($node);
+  node_access_acquire_grants($node);
+}
+
+
+/**
+ * Save the grant settings/options for the node.
+ *
+ * @param $node
+ *   node object the grant is being applied to.
+ * @param array $grant
+ *   array(
+ *    'gid' => (int) gid for realm,
+ *    'realm' => (string) what realm the access grant belongs to (ex: nodeaccess_rid).
+ *    'grant_view' => (int) view access being granted,
+ *    'grant_update' => (int) update access being granted,
+ *    'grant_delete' => (int) delete access being granted,
+ *  )
+ */
+function nodeaccess_save_grant(NodeInterface $node, $grant) {
+  // Save role and user grants to our own table.
+  try {
+    db_insert('nodeaccess')
+      ->fields([
+        'nid' => $node->nid,
+        'gid' => $grant['gid'],
+        'realm' => $grant['realm'],
+        'grant_view' => (int) $grant['grant_view'],
+        'grant_update' => (int) $grant['grant_update'],
+        'grant_delete' => (int) $grant['grant_delete'],
+      ])
+      ->execute();
+  }
+  catch (Exception $e) {
+    drupal_set_message(t("Database error has occurred while saving to nodeaccess table."), 'error');
+    $message = t('Database error: @message.', ['@message' => $e->getMessage()]);
+    \Drupal::logger('nodeaccess')->error($message);
+  }
+}
+
+/**
+ * Add the grant tab to the specified node type.
+ *
+ * @param string $type
+ *   The node type we are adding the grant tab for.
+ */
+function nodeaccess_add_type_grant($type) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $grants = $config->get('nodeaccess_types');
+  $grants[$type] = TRUE;
+
+  nodeaccess_set_type_grants($grants);
+}
+
+
+/**
+ * Delete the grant tab for specified node type.
+ *
+ * @param string $type
+ *   The node type we are removing the grant tab from.
+ */
+function nodeaccess_delete_type_grant($type) {
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $grants = $config->get('nodeaccess_types');
+
+  if (isset($grants[$type])) {
+    unset($grants[$type]);
+  }
+
+  nodeaccess_set_type_grants($grants);
+}
+
+
+/**
+ * Set the grant tab settings for all node types.
+ *
+ * @param array $types
+ *   The types that will have the grant tab appear.
+ *
+ */
+function nodeaccess_set_type_grants($types = array()) {
+  if (!is_array($types)) {
+    return;
+  }
+  $config = \Drupal::configFactory()->getEditable('nodeaccess.settings');
+  $config->set('nodeaccess_types', $types);
+  $config->save();
+
+  node_access_needs_rebuild(TRUE);
+}

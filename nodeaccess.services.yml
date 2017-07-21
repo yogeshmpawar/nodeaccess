@@ -1,0 +1,5 @@
+services:
+  access_check.node_access_grant_tab_access:
+    class: Drupal\nodeaccess\Access\NodeAccessGrantTabAccessCheck
+    tags:
+      - { name: access_check, applies_to: _node_access_grant_tab_access }
